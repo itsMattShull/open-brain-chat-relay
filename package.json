@@ -1,0 +1,17 @@
+{
+    "name": "open-brain-chat-relay",
+    "version": "1.0.0",
+    "description": "Discord DM relay for Edith",
+    "main": "relay.js",
+    "type": "module",
+    "scripts": {
+        "start": "node relay.js"
+    },
+    "dependencies": {
+        "discord.js": "^14.0.0",
+        "dotenv": "^17.3.1"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC"
+}
