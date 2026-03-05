@@ -4,8 +4,9 @@ import { Client, GatewayIntentBits, Partials } from "discord.js";
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID;
 const CHAT_FUNCTION_URL = process.env.CHAT_FUNCTION_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
-if (!DISCORD_BOT_TOKEN || !ALLOWED_USER_ID || !CHAT_FUNCTION_URL) {
+if (!DISCORD_BOT_TOKEN || !ALLOWED_USER_ID || !CHAT_FUNCTION_URL || !SUPABASE_ANON_KEY) {
     console.error("Missing required environment variables.");
     process.exit(1);
 }
@@ -44,7 +45,10 @@ client.on("messageCreate", async (message) => {
     try {
         const res = await fetch(CHAT_FUNCTION_URL, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+            },
             body: JSON.stringify({
                 user_id: message.author.id,
                 discord_user_id: message.author.id,
