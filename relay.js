@@ -70,7 +70,7 @@ const TOOLS = [
                 properties: {
                     query: { type: "string", description: "Natural language search query" },
                     limit: { type: "number", description: "Max results to return (default 10)" },
-                    threshold: { type: "number", description: "Similarity threshold 0-1 (default 0.3, lower = broader)" },
+                    threshold: { type: "number", description: "Similarity threshold 0-1 (default 0.3, use different lower similarities, lower = broader)" },
                 },
                 required: ["query"],
             },
