@@ -1,14 +1,14 @@
 import "dotenv/config";
 import { Client, GatewayIntentBits, Partials } from "discord.js";
 
-// ─── Config ──────────────────────────────────────────────────────────────────
+// ─── Config ───────────────────────────────────────────────────────────────────
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const MCP_SERVER_URL = process.env.MCP_SERVER_URL;       // e.g. https://your-project.supabase.co/functions/v1/open-brain
-const MCP_ACCESS_KEY = process.env.MCP_ACCESS_KEY;       // your x-brain-key value
-const SUPABASE_URL = process.env.SUPABASE_URL;         // e.g. https://your-project.supabase.co
+const MCP_SERVER_URL = process.env.MCP_SERVER_URL;   // open-brain edge function URL
+const MCP_ACCESS_KEY = process.env.MCP_ACCESS_KEY;   // x-brain-key value
+const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
 const required = { DISCORD_BOT_TOKEN, ALLOWED_USER_ID, OPENROUTER_API_KEY, MCP_SERVER_URL, MCP_ACCESS_KEY, SUPABASE_URL, SUPABASE_ANON_KEY };
@@ -39,6 +39,110 @@ Meeting with [who] about [topic]. Key points: [important stuff]. Action items: [
 Saving from [AI tool or source]: [the key takeaway or output worth keeping].
 
 Only use a template if it genuinely fits. If none fit, write a clean plain sentence instead.`;
+
+// ─── Tool definitions (OpenAI function format) ────────────────────────────────
+// These mirror the MCP server tools exactly.
+// OpenRouter sees these as normal function tools.
+// Execution is proxied to the MCP server via HTTP.
+
+const TOOLS = [
+    {
+        type: "function",
+        function: {
+            name: "capture_thought",
+            description: "Save a new thought to the Edith knowledge base. Use this when the user wants to save something — notes, insights, decisions, or anything worth remembering.",
+            parameters: {
+                type: "object",
+                properties: {
+                    content: { type: "string", description: "The thought to capture — a clear, standalone statement that will make sense when retrieved later" },
+                },
+                required: ["content"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "search_thoughts",
+            description: "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea they may have previously captured. Run 2-3 searches with different keywords before concluding nothing exists.",
+            parameters: {
+                type: "object",
+                properties: {
+                    query: { type: "string", description: "Natural language search query" },
+                    limit: { type: "number", description: "Max results to return (default 10)" },
+                    threshold: { type: "number", description: "Similarity threshold 0-1 (default 0.3, lower = broader)" },
+                },
+                required: ["query"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "list_thoughts",
+            description: "List recently captured thoughts with optional filters by type, topic, person, or time range.",
+            parameters: {
+                type: "object",
+                properties: {
+                    limit: { type: "number", description: "Max results to return (default 10)" },
+                    type: { type: "string", description: "Filter by type: observation, task, idea, reference, person_note" },
+                    topic: { type: "string", description: "Filter by topic tag" },
+                    person: { type: "string", description: "Filter by person mentioned" },
+                    days: { type: "number", description: "Only return thoughts from the last N days" },
+                },
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "thought_stats",
+            description: "Get a summary of all captured thoughts: totals, types, top topics, and people mentioned.",
+            parameters: { type: "object", properties: {} },
+        },
+    },
+];
+
+// ─── MCP tool execution ───────────────────────────────────────────────────────
+// Proxies tool calls to the MCP server using the MCP JSON-RPC protocol.
+// The MCP server does all the actual work — embeddings, DB, etc.
+
+async function callMCPTool(toolName, toolArgs) {
+    const body = {
+        jsonrpc: "2.0",
+        id: Date.now(),
+        method: "tools/call",
+        params: {
+            name: toolName,
+            arguments: toolArgs,
+        },
+    };
+
+    const r = await fetch(MCP_SERVER_URL, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "x-brain-key": MCP_ACCESS_KEY,
+        },
+        body: JSON.stringify(body),
+    });
+
+    if (!r.ok) {
+        return `MCP error: ${r.status} ${await r.text()}`;
+    }
+
+    const d = await r.json();
+
+    if (d.result?.content) {
+        return d.result.content
+            .filter(c => c.type === "text")
+            .map(c => c.text)
+            .join("\n");
+    }
+
+    if (d.error) return `Tool error: ${d.error.message}`;
+    return "No result returned.";
+}
 
 // ─── Supabase REST helpers ────────────────────────────────────────────────────
 
@@ -100,9 +204,9 @@ async function getRecentThoughts(limit = 50) {
     return Array.isArray(data) ? data : [];
 }
 
-// ─── OpenRouter + MCP call ────────────────────────────────────────────────────
+// ─── OpenRouter call ──────────────────────────────────────────────────────────
 
-async function callOpenRouterWithMCP(messages) {
+async function callOpenRouter(messages) {
     const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
         method: "POST",
         headers: {
@@ -112,21 +216,12 @@ async function callOpenRouterWithMCP(messages) {
         body: JSON.stringify({
             model: MODEL,
             messages,
-            tools: [
-                {
-                    type: "mcp",
-                    server_label: "edith",
-                    server_url: MCP_SERVER_URL,
-                    headers: { "x-brain-key": MCP_ACCESS_KEY },
-                    require_approval: "never",
-                },
-            ],
+            tools: TOOLS,
+            tool_choice: "auto",
         }),
     });
-    if (!r.ok) {
-        const err = await r.text();
-        throw new Error(`OpenRouter error: ${r.status} ${err}`);
-    }
+
+    if (!r.ok) throw new Error(`OpenRouter error: ${r.status} ${await r.text()}`);
     return await r.json();
 }
 
@@ -183,16 +278,16 @@ Maximum 5 candidates. Be selective.${existingSummary}`,
     await upsertPendingMemory(userId, candidates);
 
     const candidateList = candidates.map(c => `**${c.index}.** ${c.content}`).join("\n");
-    const prompt = `🧠 **Memory check** — worth saving to Edith?\n\n${candidateList}\n\nReply \`save 1, 3\` to save specific ones, \`save all\` to save everything, or \`skip\` to dismiss.`;
-
-    await discordChannel.send(prompt);
+    await discordChannel.send(
+        `🧠 **Memory check** — worth saving to Edith?\n\n${candidateList}\n\nReply \`save 1, 3\` to save specific ones, \`save all\` to save everything, or \`skip\` to dismiss.`
+    );
 }
 
 // ─── Save/skip handler ────────────────────────────────────────────────────────
 
-async function handleMemoryReply(userId, message, discordChannel) {
+async function handleMemoryReply(userId, message) {
     const pending = await getPendingMemory(userId);
-    if (!pending) return null; // not a memory reply
+    if (!pending) return null;
 
     const candidates = pending.candidates;
     const lower = message.toLowerCase().trim();
@@ -209,30 +304,24 @@ async function handleMemoryReply(userId, message, discordChannel) {
         const numbers = lower.replace("save", "").match(/\d+/g)?.map(Number) ?? [];
         toSave = candidates.filter(c => numbers.includes(c.index));
     } else {
-        return null; // not a save/skip command
+        return null; // not a memory reply
     }
 
     if (toSave.length === 0) {
         return "Couldn't match those numbers. Try `save 1, 2` or `skip`.";
     }
 
-    // Use the MCP capture tool directly for each item
-    const results = await Promise.all(toSave.map(async (c) => {
-        const d = await callOpenRouterWithMCP([
-            { role: "user", content: `capture_thought: ${c.content}` },
-        ]);
-        // Just trigger the capture — confirm optimistically
-        return `✅ ${c.content.substring(0, 60)}${c.content.length > 60 ? "..." : ""}`;
-    }));
+    // Proxy each capture through the MCP server
+    await Promise.all(toSave.map(c => callMCPTool("capture_thought", { content: c.content })));
 
     await deletePendingMemory(userId);
-    return `Saved ${toSave.length} thought${toSave.length > 1 ? "s" : ""}:\n${results.join("\n")}`;
+    return `Saved ${toSave.length} thought${toSave.length > 1 ? "s" : ""}:\n${toSave.map(c => `✅ ${c.content.substring(0, 80)}${c.content.length > 80 ? "..." : ""}`).join("\n")}`;
 }
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are Edith, a personal AI assistant and knowledge base.
-You have access to the user's captured thoughts, notes, and ideas via MCP tools.
+You have access to the user's captured thoughts, notes, and ideas via tools.
 You are talking to the user via Discord DM. Be warm, direct, and conversational — like a smart friend who happens to remember everything they've told you.
 
 SEARCHING RULES — follow these exactly:
@@ -259,11 +348,11 @@ async function handleMessage(userId, userMessage, discordChannel) {
     // Check for pending memory reply first
     const lower = userMessage.toLowerCase().trim();
     if (lower.startsWith("save") || lower === "skip") {
-        const memoryReply = await handleMemoryReply(userId, userMessage, discordChannel);
+        const memoryReply = await handleMemoryReply(userId, userMessage);
         if (memoryReply) return memoryReply;
     }
 
-    // Load history and save new user message
+    // Load history and save the new user message
     const history = await loadHistory(userId);
     await saveMessage(userId, "user", userMessage);
 
@@ -273,13 +362,39 @@ async function handleMessage(userId, userMessage, discordChannel) {
         { role: "user", content: userMessage },
     ];
 
-    // Call OpenRouter with MCP attached — it handles the tool loop internally
-    const d = await callOpenRouterWithMCP(messages);
-    const reply = d.choices[0].message.content;
+    // ── Tool calling loop ────────────────────────────────────────────────────
+    // Keep looping until the AI produces a final reply with no tool calls
+    let finalReply = "";
 
-    await saveMessage(userId, "assistant", reply);
+    while (true) {
+        const d = await callOpenRouter(messages);
+        const responseMessage = d.choices[0].message;
 
-    // Check if it's time for a memory review
+        if (!responseMessage.tool_calls || responseMessage.tool_calls.length === 0) {
+            finalReply = responseMessage.content;
+            break;
+        }
+
+        // Push assistant's tool call message into the conversation
+        messages.push(responseMessage);
+
+        // Execute each tool call by proxying to the MCP server
+        for (const toolCall of responseMessage.tool_calls) {
+            const args = JSON.parse(toolCall.function.arguments || "{}");
+            console.log(`Tool call: ${toolCall.function.name}`, args);
+            const result = await callMCPTool(toolCall.function.name, args);
+            messages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: result,
+            });
+        }
+        // Loop so the AI can reason over the tool results
+    }
+
+    await saveMessage(userId, "assistant", finalReply);
+
+    // Trigger memory review every SUMMARIZE_EVERY messages
     const total = await countMessages(userId);
     if (total % SUMMARIZE_EVERY === 0) {
         summarizeAndPrompt(userId, discordChannel).catch(err =>
@@ -287,7 +402,7 @@ async function handleMessage(userId, userMessage, discordChannel) {
         );
     }
 
-    return reply;
+    return finalReply;
 }
 
 // ─── Discord client ───────────────────────────────────────────────────────────
@@ -301,7 +416,7 @@ const client = new Client({
 });
 
 client.once("clientReady", () => {
-    // console.log(`Relay online as ${client.user.tag}`);
+    console.log(`Relay online as ${client.user.tag}`);
 });
 
 client.on("messageCreate", async (message) => {
@@ -317,8 +432,7 @@ client.on("messageCreate", async (message) => {
     const userMessage = message.content.trim();
     if (!userMessage) return;
 
-    // console.log(`DM from ${message.author.tag}: ${userMessage}`);
-
+    console.log(`DM from ${message.author.tag}: ${userMessage}`);
     await message.channel.sendTyping();
 
     try {
